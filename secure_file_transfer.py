@@ -1,14 +1,23 @@
 import scapy.all as scapy
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import serialization
 import os
 import socket
 import struct
 import time
 
+# RSA anahtar çifti oluşturma
+def generate_rsa_keys():
+    print("RSA anahtar çifti oluşturuluyor...")
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    return private_key, public_key
+
 # AES şifreleme için anahtar oluşturma
 def generate_key():
-    print("Anahtar oluşturuluyor...")
+    print("AES anahtar oluşturuluyor...")
     return Fernet.generate_key()
 
 # Dosyayı şifreleme
@@ -64,7 +73,10 @@ def send_packet(data, src_ip, dst_ip, seq_num, frag_offset=0, ttl=64, id=1):
 
 # Sunucu tarafı
 def server(host='127.0.0.1', port=12345):
+    # RSA anahtar çifti oluştur
+    private_key, public_key = generate_rsa_keys()
     key = generate_key()
+    
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((host, port))
     s.listen(1)
@@ -72,7 +84,33 @@ def server(host='127.0.0.1', port=12345):
     
     conn, addr = s.accept()
     print(f"İstemci bağlandı: {addr}")
-    conn.send(key)  # Anahtarı istemciye gönder
+    
+    # RSA genel anahtarını istemciye gönder
+    public_key_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo  # Düzeltildi
+    )
+    conn.send(public_key_pem)
+    print(f"RSA genel anahtarı gönderildi, boyutu: {len(public_key_pem)} bayt")
+    
+    # Şifreli AES anahtarını al
+    try:
+        encrypted_key = conn.recv(4096)
+        print(f"Şifreli AES anahtarı alındı, boyutu: {len(encrypted_key)} bayt")
+        key = private_key.decrypt(
+            encrypted_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        print("AES anahtarı alındı ve çözüldü")
+    except Exception as e:
+        print(f"AES anahtar çözme hatası: {e}")
+        conn.close()
+        s.close()
+        return
     
     # Parçaları al ve birleştir
     fragments = {}
@@ -85,18 +123,16 @@ def server(host='127.0.0.1', port=12345):
                 break
             seq_num = struct.unpack('!I', data[:4])[0]
             print(f"Parça alındı: seq={seq_num}")
-            if seq_num == 0:  # İlk parça, toplam parça sayısını içerir
+            if seq_num == 0:
                 total_fragments = struct.unpack('!I', data[4:8])[0]
                 fragments[seq_num] = data[8:]
                 print(f"Toplam parça sayısı: {total_fragments}")
             else:
                 fragments[seq_num] = data[4:]
             
-            # Onay (ACK) gönder
             conn.send(struct.pack('!I', seq_num))
             print(f"Onay gönderildi: seq={seq_num}")
             
-            # Tüm parçalar alındıysa döngüden çık
             if total_fragments and len(fragments) == total_fragments:
                 print("Tüm parçalar alındı, döngüden çıkılıyor")
                 break
@@ -111,11 +147,11 @@ def server(host='127.0.0.1', port=12345):
             conn.send(struct.pack('!I', len(missing)) + b''.join(struct.pack('!I', i) for i in missing))
         else:
             print("Tüm parçalar alındı")
-            conn.send(struct.pack('!I', 0))  # Eksik parça yok
+            conn.send(struct.pack('!I', 0))
     except Exception as e:
         print(f"Eksik parça bildirimi hatası: {e}")
     
-    # Parçaları sıralı birleştir
+    # Parçaları birleştir
     received_data = b""
     for i in sorted(fragments.keys()):
         received_data += fragments[i]
@@ -139,7 +175,6 @@ def server(host='127.0.0.1', port=12345):
 
 # İstemci tarafı
 def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='127.0.0.1'):
-    # Soket bağlantısı
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.connect((host, port))
@@ -148,12 +183,31 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
         print(f"Bağlantı hatası: {e}")
         return
     
-    # Sunucudan anahtarı al
+    # RSA genel anahtarını al
     try:
-        key = s.recv(1024)
-        print(f"Anahtar alındı, boyutu: {len(key)} bayt")
+        public_key_pem = s.recv(4096)
+        public_key = serialization.load_pem_public_key(public_key_pem)
+        print("RSA genel anahtarı alındı")
     except Exception as e:
-        print(f"Anahtar alma hatası: {e}")
+        print(f"RSA anahtar alma hatası: {e}")
+        s.close()
+        return
+    
+    # AES anahtarı oluştur ve RSA ile şifrele
+    key = generate_key()
+    try:
+        encrypted_key = public_key.encrypt(
+            key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        s.send(encrypted_key)
+        print("Şifreli AES anahtarı gönderildi")
+    except Exception as e:
+        print(f"AES anahtar şifreleme hatası: {e}")
         s.close()
         return
     
@@ -170,7 +224,7 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
     # Parçaları gönder
     for i, fragment in enumerate(fragments):
         data = struct.pack('!I', i)
-        if i == 0:  # İlk parça, toplam parça sayısını içerir
+        if i == 0:
             data += struct.pack('!I', len(fragments))
             data += fragment
         else:
@@ -178,7 +232,6 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
         try:
             s.sendall(data)
             print(f"Parça gönderildi: seq={i}")
-            # Onay bekle
             ack = s.recv(4)
             ack_seq = struct.unpack('!I', ack)[0]
             if ack_seq != i:
@@ -189,7 +242,6 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
             print(f"Parça gönderme veya onay alma hatası: {e}")
             s.close()
             return
-        # Scapy ile IP paketi gönder
         send_packet(fragment, src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1)
     
     # Eksik parçaları kontrol et
