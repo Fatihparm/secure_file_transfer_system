@@ -71,9 +71,27 @@ def send_packet(data, src_ip, dst_ip, seq_num, frag_offset=0, ttl=64, id=1):
     except Exception as e:
         print(f"Paket gönderme hatası: {e}")
 
+# Kimlik doğrulama
+def authenticate_client(conn):
+    try:
+        credentials = conn.recv(1024).decode()
+        username, password = credentials.split(':')
+        valid_credentials = {'user1': 'password123', 'user2': 'securepass456'}
+        if valid_credentials.get(username) == password:
+            conn.send(b'AUTH_OK')
+            print(f"Kimlik doğrulama başarılı: {username}")
+            return True
+        else:
+            conn.send(b'AUTH_FAIL')
+            print(f"Kimlik doğrulama başarısız: {username}")
+            return False
+    except Exception as e:
+        print(f"Kimlik doğrulama hatası: {e}")
+        conn.send(b'AUTH_FAIL')
+        return False
+
 # Sunucu tarafı
 def server(host='127.0.0.1', port=12345):
-    # RSA anahtar çifti oluştur
     private_key, public_key = generate_rsa_keys()
     key = generate_key()
     
@@ -85,10 +103,17 @@ def server(host='127.0.0.1', port=12345):
     conn, addr = s.accept()
     print(f"İstemci bağlandı: {addr}")
     
+    # Kimlik doğrulama
+    if not authenticate_client(conn):
+        conn.close()
+        s.close()
+        print("Kimlik doğrulama başarısız, bağlantı kapatılıyor")
+        return
+    
     # RSA genel anahtarını istemciye gönder
     public_key_pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo  # Düzeltildi
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
     conn.send(public_key_pem)
     print(f"RSA genel anahtarı gönderildi, boyutu: {len(public_key_pem)} bayt")
@@ -181,6 +206,22 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
         print(f"Sunucuya bağlanıldı: {host}:{port}")
     except Exception as e:
         print(f"Bağlantı hatası: {e}")
+        return
+    
+    # Kimlik doğrulama
+    try:
+        username = input("Kullanıcı adı: ")
+        password = input("Parola: ")
+        s.send(f"{username}:{password}".encode())
+        auth_response = s.recv(1024)
+        if auth_response != b'AUTH_OK':
+            print("Kimlik doğrulama başarısız, bağlantı kapatılıyor")
+            s.close()
+            return
+        print("Kimlik doğrulama başarılı")
+    except Exception as e:
+        print(f"Kimlik doğrulama hatası: {e}")
+        s.close()
         return
     
     # RSA genel anahtarını al
