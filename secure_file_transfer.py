@@ -7,6 +7,7 @@ import os
 import socket
 import struct
 import time
+import random
 
 # RSA anahtar çifti oluşturma
 def generate_rsa_keys():
@@ -58,9 +59,27 @@ def fragment_file(file_data, chunk_size=1024):
     print(f"Dosya {len(fragments)} parçaya ayrıldı")
     return fragments
 
-# IP paketi gönderme
-def send_packet(data, src_ip, dst_ip, seq_num, frag_offset=0, ttl=64, id=1):
+# RTT ölçümü
+def measure_rtt(dst_ip, count=5):
+    print(f"RTT ölçülüyor: {dst_ip}")
+    rtt_list = []
+    for _ in range(count):
+        start_time = time.time()
+        pkt = scapy.IP(dst=dst_ip)/scapy.ICMP()
+        ans = scapy.sr1(pkt, timeout=2, verbose=False)
+        if ans:
+            rtt = (time.time() - start_time) * 1000  # ms cinsinden
+            rtt_list.append(rtt)
+    avg_rtt = sum(rtt_list) / len(rtt_list) if rtt_list else 0
+    print(f"Ortalama RTT: {avg_rtt:.2f} ms")
+    return avg_rtt
+
+# IP paketi gönderme (paket kaybı simülasyonu ile)
+def send_packet(data, src_ip, dst_ip, seq_num, frag_offset=0, ttl=64, id=1, packet_loss_prob=0.0):
     print(f"IP paketi gönderiliyor: seq={seq_num}, offset={frag_offset}")
+    if random.random() < packet_loss_prob:
+        print(f"Paket düşürüldü (simülasyon): seq={seq_num}")
+        return False
     ip_packet = scapy.IP(src=src_ip, dst=dst_ip, ttl=ttl, id=id)
     ip_packet.flags = 'MF' if frag_offset > 0 else 0
     ip_packet.frag = frag_offset // 8
@@ -68,8 +87,10 @@ def send_packet(data, src_ip, dst_ip, seq_num, frag_offset=0, ttl=64, id=1):
     try:
         scapy.send(ip_packet / scapy.Raw(load=payload), verbose=False)
         print(f"Paket gönderildi: seq={seq_num}")
+        return True
     except Exception as e:
         print(f"Paket gönderme hatası: {e}")
+        return False
 
 # Kimlik doğrulama
 def authenticate_client(conn):
@@ -89,6 +110,51 @@ def authenticate_client(conn):
         print(f"Kimlik doğrulama hatası: {e}")
         conn.send(b'AUTH_FAIL')
         return False
+
+# MITM simülasyonu
+def mitm_test(host='127.0.0.1', port=12345):
+    print("MITM testi başlatılıyor...")
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect((host, port))
+        print(f"Sunucuya bağlanıldı (MITM): {host}:{port}")
+    except Exception as e:
+        print(f"MITM bağlantı hatası: {e}")
+        return
+    
+    # Yanlış kimlik bilgileriyle doğrulama denemesi
+    try:
+        s.send("hacker:wrongpass".encode())
+        auth_response = s.recv(1024)
+        if auth_response == b'AUTH_OK':
+            print("MITM: Kimlik doğrulama beklenmedik şekilde başarılı!")
+        else:
+            print("MITM: Kimlik doğrulama başarısız (beklenen davranış)")
+    except Exception as e:
+        print(f"MITM kimlik doğrulama hatası: {e}")
+    
+    # Sahte RSA anahtarı alma denemesi
+    try:
+        fake_public_key_pem = s.recv(4096)
+        print("MITM: Sahte RSA anahtarı alındı")
+        # Sahte bir AES anahtarı gönder
+        fake_key = Fernet.generate_key()
+        fake_public_key = serialization.load_pem_public_key(fake_public_key_pem)
+        encrypted_fake_key = fake_public_key.encrypt(
+            fake_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+        s.send(encrypted_fake_key)
+        print("MITM: Sahte AES anahtarı gönderildi")
+    except Exception as e:
+        print(f"MITM sahte anahtar hatası: {e}")
+    
+    s.close()
+    print("MITM testi tamamlandı")
 
 # Sunucu tarafı
 def server(host='127.0.0.1', port=12345):
@@ -208,10 +274,13 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
         print(f"Bağlantı hatası: {e}")
         return
     
+    # RTT ölçümü
+    measure_rtt(dst_ip)
+    
     # Kimlik doğrulama
     try:
-        username = input("Kullanıcı adı: ")
-        password = input("Parola: ")
+        username = "user1"
+        password = "password123"
         s.send(f"{username}:{password}".encode())
         auth_response = s.recv(1024)
         if auth_response != b'AUTH_OK':
@@ -262,7 +331,10 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
     # Dosyayı parçalara ayır
     fragments = fragment_file(encrypted_data, chunk_size=1024)
     
-    # Parçaları gönder
+    # Parçaları gönder ve bant genişliği ölç
+    start_time = time.time()
+    sent_packets = 0
+    total_sent_bytes = 0
     for i, fragment in enumerate(fragments):
         data = struct.pack('!I', i)
         if i == 0:
@@ -279,11 +351,14 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
                 print(f"Hata: {i}. parça için onay alınamadı!")
             else:
                 print(f"Onay alındı: seq={i}")
+                sent_packets += 1
+                total_sent_bytes += len(fragment)
         except Exception as e:
             print(f"Parça gönderme veya onay alma hatası: {e}")
             s.close()
             return
-        send_packet(fragment, src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1)
+        if send_packet(fragment, src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1, packet_loss_prob=0.0):
+            sent_packets += 1
     
     # Eksik parçaları kontrol et
     try:
@@ -297,10 +372,22 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
                 s.sendall(data)
                 print(f"Eksik parça gönderildi: seq={i}")
                 send_packet(fragments[i], src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1)
+                sent_packets += 1
+                total_sent_bytes += len(fragments[i])
         else:
             print("Tüm parçalar başarıyla gönderildi")
     except Exception as e:
         print(f"Eksik parça kontrol hatası: {e}")
+    
+    # Bant genişliği hesapla
+    transfer_time = time.time() - start_time
+    if transfer_time > 0:
+        bandwidth = (total_sent_bytes / 1024) / transfer_time  # KB/s
+        print(f"Ortalama bant genişliği: {bandwidth:.2f} KB/s")
+    
+    # Paket kaybı oranı
+    packet_loss_rate = 0 if len(fragments) == sent_packets else (len(fragments) - sent_packets) / len(fragments)
+    print(f"Paket kaybı oranı: {packet_loss_rate:.2%}")
     
     s.close()
     print("İstemci bağlantısı kapandı")
@@ -308,8 +395,10 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Kullanım: python secure_file_transfer.py [server|client] [dosya_yolu]")
+        print("Kullanım: python secure_file_transfer.py [server|client|mitm] [dosya_yolu]")
     elif sys.argv[1] == "server":
         server()
     elif sys.argv[1] == "client":
         client(sys.argv[2])
+    elif sys.argv[1] == "mitm":
+        mitm_test()
