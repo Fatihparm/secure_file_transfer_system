@@ -357,9 +357,9 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
             print(f"Parça gönderme veya onay alma hatası: {e}")
             s.close()
             return
-        if send_packet(fragment, src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1, packet_loss_prob=0.0):
-            sent_packets += 1
-    
+        # Scapy ile paket gönderme, ancak sent_packets artırma yapma
+        send_packet(fragment, src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1, packet_loss_prob=0.0)
+
     # Eksik parçaları kontrol et
     try:
         missing_count = struct.unpack('!I', s.recv(4))[0]
@@ -372,7 +372,7 @@ def client(file_path, host='127.0.0.1', port=12345, src_ip='127.0.0.1', dst_ip='
                 s.sendall(data)
                 print(f"Eksik parça gönderildi: seq={i}")
                 send_packet(fragments[i], src_ip, dst_ip, seq_num=i, frag_offset=i * 1024, id=i+1)
-                sent_packets += 1
+                sent_packets += 1  # Yeniden gönderilen parçalar için artırma
                 total_sent_bytes += len(fragments[i])
         else:
             print("Tüm parçalar başarıyla gönderildi")
